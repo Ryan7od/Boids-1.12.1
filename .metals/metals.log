@@ -1,0 +1,7 @@
+2026.03.15 11:00:25 INFO  Started: Metals version 1.6.6 in folders 'D:\Projects\Personal\Minecraft Mods\Boids-1.21.1' for client Visual Studio Code 1.111.0.
+2026.03.15 11:00:25 INFO  Memory monitor started
+2026.03.15 11:00:26 WARN  Using H2 2.4.240 which is newer than the version Flyway has been verified with. The latest verified version of H2 is 2.3.232.
+Mar 15, 2026 12:01:02 PM org.eclipse.lsp4j.jsonrpc.services.GenericEndpoint notify
+INFO: Unsupported notification method: $/setTrace
+Mar 15, 2026 12:01:08 PM org.eclipse.lsp4j.jsonrpc.services.GenericEndpoint notify
+INFO: Unsupported notification method: $/setTrace

@@ -1,0 +1,47 @@
+{
+	"schemaVersion": 1,
+	"id": "boids",
+	"version": "${version}",
+	"name": "Boids",
+	"description": "Implementing Boids in Minecraft - Ryan O'Donnell",
+	"authors": [
+		"Ryan O'Donnell"
+	],
+	"contact": {
+		"homepage": "https://ryanod.me/",
+		"sources": "https://github.com/Boids-1.21.1"
+	},
+	"license": "MIT",
+	"icon": "assets/boids/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			{
+				"value": "me.ryanod.boids.Boids",
+				"adapter": "kotlin"
+			}
+		],
+		"client": [
+			{
+				"value": "me.ryanod.boids.client.BoidsClient",
+				"adapter": "kotlin"
+			}
+		],
+		"fabric-datagen": [
+			{
+				"value": "me.ryanod.boids.BoidsDataGenerator",
+				"adapter": "kotlin"
+			}
+		]
+	},
+	"mixins": [
+		"boids.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.18.4",
+		"minecraft": "~1.21.1",
+		"java": ">=21",
+		"fabric-api": "*",
+		"fabric-language-kotlin": "*"
+	}
+}
