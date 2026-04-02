@@ -9,3 +9,12 @@ INFO: Unsupported notification method: $/setTrace
 2026.03.15 12:59:08 INFO  Memory monitor stopped
 2026.03.15 12:59:08 INFO  shutting down Metals
 2026.03.15 12:59:08 INFO  Exiting server
+2026.04.02 19:16:11 INFO  Started: Metals version 1.6.6 in folders 'D:\Projects\Personal\Minecraft Mods\Boids-1.21.1' for client Visual Studio Code 1.113.0.
+2026.04.02 19:16:11 INFO  Memory monitor started
+2026.04.02 19:16:11 WARN  Using H2 2.4.240 which is newer than the version Flyway has been verified with. The latest verified version of H2 is 2.3.232.
+2026.04.02 19:16:11 INFO  no build target found for D:\Projects\Personal\Minecraft Mods\Boids-1.21.1\src\main\java\me\ryanod\boids\mixin\ExampleMixin.java. Using fallback presentation compiler.
+2026.04.02 19:16:13 INFO  no build target found for D:\Projects\Personal\Minecraft Mods\Boids-1.21.1\src\main\java\me\ryanod\boids\mixin\ExampleMixin.java. Using fallback presentation compiler.
+2026.04.02 19:16:15 INFO  no build target found for D:\Projects\Personal\Minecraft Mods\Boids-1.21.1\src\main\java\me\ryanod\boids\mixin\ExampleMixin.java. Using fallback presentation compiler.
+2026.04.02 19:16:15 INFO  no build target found for D:\Projects\Personal\Minecraft Mods\Boids-1.21.1\src\main\java\me\ryanod\boids\mixin\ExampleMixin.java. Using fallback presentation compiler.
+Apr 02, 2026 7:16:18 PM org.eclipse.lsp4j.jsonrpc.services.GenericEndpoint notify
+INFO: Unsupported notification method: $/setTrace

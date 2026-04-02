@@ -2,6 +2,7 @@ package me.ryanod.boids.registry
 
 import me.ryanod.boids.Boids
 import me.ryanod.boids.entity.BoidCodEntity
+import me.ryanod.boids.entity.BoidCodPullEntity
 import net.fabricmc.fabric.api.`object`.builder.v1.entity.FabricDefaultAttributeRegistry
 import net.minecraft.core.Registry
 import net.minecraft.core.registries.BuiltInRegistries
@@ -21,6 +22,16 @@ object BoidEntityTypes {
             .eyeHeight(0.195f)
             .clientTrackingRange(4)
             .build("boid_cod"),
+    )
+
+    val BOID_COD_PULL: EntityType<BoidCodPullEntity> = Registry.register(
+        BuiltInRegistries.ENTITY_TYPE,
+        id("boid_cod_pull"),
+        EntityType.Builder.of({ entityType, level -> BoidCodPullEntity(entityType, level) }, MobCategory.MISC)
+            .sized(0.9f, 0.9f)
+            .clientTrackingRange(8)
+            .updateInterval(2)
+            .build("boid_cod_pull"),
     )
 
     init {

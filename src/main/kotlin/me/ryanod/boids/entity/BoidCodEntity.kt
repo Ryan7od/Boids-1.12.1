@@ -1,6 +1,7 @@
 package me.ryanod.boids.entity
 
 import net.minecraft.core.BlockPos
+import net.minecraft.nbt.CompoundTag
 import net.minecraft.sounds.SoundEvent
 import net.minecraft.sounds.SoundEvents
 import net.minecraft.tags.FluidTags
@@ -17,6 +18,7 @@ import net.minecraft.world.level.ServerLevelAccessor
 import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.Vec3
 import kotlin.jvm.JvmName
+import java.util.UUID
 
 open class BoidCodEntity(
     entityType: EntityType<out BoidCodEntity>,
@@ -47,6 +49,17 @@ open class BoidCodEntity(
     private var wanderTicksRemaining = 0
     private var currentWanderOffset = Vec3.ZERO
     private var lastCruiseHeading = Vec3(0.0, 0.0, 1.0)
+    private var currentPreferredPullUuid: UUID? = null
+    private var candidatePullEntityUuid: UUID? = null
+    private var candidatePreferredPullRescoreCount = 0
+    private var currentPreferredPullMissingRescoreCount = 0
+    private var pullRescoreCooldownTicks = 0
+    private val pullAffinityHistory = mutableMapOf<UUID, Float>()
+
+    private data class ScoredPull(
+        val pullEntity: BoidCodPullEntity,
+        val score: Double,
+    )
 
     override fun getAmbientSound(): SoundEvent = SoundEvents.COD_AMBIENT
 
@@ -55,6 +68,26 @@ open class BoidCodEntity(
     override fun getHurtSound(damageSource: DamageSource): SoundEvent = SoundEvents.COD_HURT
 
     override fun getFlopSound(): SoundEvent = SoundEvents.COD_FLOP
+
+    fun seedPullPreference(anchor: BoidCodPullEntity, historyAffinity: Float) {
+        currentPreferredPullUuid = anchor.uuid
+        candidatePullEntityUuid = null
+        candidatePreferredPullRescoreCount = 0
+        currentPreferredPullMissingRescoreCount = 0
+        pullRescoreCooldownTicks = PULL_RESCORE_INTERVAL
+        pullAffinityHistory[anchor.uuid] = Mth.clamp(historyAffinity, 0.0f, 1.0f)
+        prunePullAffinityHistory()
+    }
+
+    fun initializeCruiseHeading(heading: Vec3) {
+        val normalizedHeading = normalizeOrFallback(heading, lastCruiseHeading)
+        lastCruiseHeading = normalizedHeading
+        val initialVelocity = normalizedHeading.scale(CRUISE_INITIAL_SPEED)
+        setDeltaMovement(initialVelocity)
+        updateYawFromVelocity(initialVelocity, getMovementProfile().turnResponse)
+    }
+
+    fun getCurrentPreferredPullUuid(): UUID? = currentPreferredPullUuid
 
     override fun updateMovementSystem() {
         updateMovementState()
@@ -147,6 +180,40 @@ open class BoidCodEntity(
     protected fun getBoidPosition(boid: BoidCodEntity = this): Vec3 = boid.position()
 
     protected fun getBoidVelocity(boid: BoidCodEntity = this): Vec3 = boid.deltaMovement
+
+    override fun addAdditionalSaveData(tag: CompoundTag) {
+        super.addAdditionalSaveData(tag)
+
+        currentPreferredPullUuid?.let { tag.putUUID("CurrentPreferredPullUuid", it) }
+        candidatePullEntityUuid?.let { tag.putUUID("CandidatePreferredPullUuid", it) }
+        tag.putInt("CandidatePreferredPullRescoreCount", candidatePreferredPullRescoreCount)
+        tag.putInt("CurrentPreferredPullMissingRescoreCount", currentPreferredPullMissingRescoreCount)
+        tag.putInt("PullRescoreCooldownTicks", pullRescoreCooldownTicks)
+
+        val affinityTag = CompoundTag()
+        pullAffinityHistory.forEach { (uuid, affinity) ->
+            affinityTag.putFloat(uuid.toString(), affinity)
+        }
+        tag.put("PullAffinityHistory", affinityTag)
+    }
+
+    override fun readAdditionalSaveData(tag: CompoundTag) {
+        super.readAdditionalSaveData(tag)
+
+        currentPreferredPullUuid = if (tag.hasUUID("CurrentPreferredPullUuid")) tag.getUUID("CurrentPreferredPullUuid") else null
+        candidatePullEntityUuid = if (tag.hasUUID("CandidatePreferredPullUuid")) tag.getUUID("CandidatePreferredPullUuid") else null
+        candidatePreferredPullRescoreCount = tag.getInt("CandidatePreferredPullRescoreCount")
+        currentPreferredPullMissingRescoreCount = tag.getInt("CurrentPreferredPullMissingRescoreCount")
+        pullRescoreCooldownTicks = tag.getInt("PullRescoreCooldownTicks")
+
+        pullAffinityHistory.clear()
+        val affinityTag = tag.getCompound("PullAffinityHistory")
+        affinityTag.getAllKeys().forEach { key ->
+            val uuid = runCatching { UUID.fromString(key) }.getOrNull() ?: return@forEach
+            pullAffinityHistory[uuid] = Mth.clamp(affinityTag.getFloat(key), 0.0f, 1.0f)
+        }
+        prunePullAffinityHistory()
+    }
 
     private fun updateMovementState() {
         if (movementState != MovementState.CRUISE) {
@@ -376,9 +443,182 @@ open class BoidCodEntity(
 
     private fun getProbeOrigin(): Vec3 = position().add(0.0, bbHeight * 0.5, 0.0)
 
-    protected open fun computeExternalSchoolInfluence(currentPosition: Vec3, currentVelocity: Vec3): Vec3 = Vec3.ZERO
+    protected open fun computeExternalSchoolInfluence(currentPosition: Vec3, currentVelocity: Vec3): Vec3 {
+        rescorePreferredPullIfNeeded(currentPosition, currentVelocity)
+
+        val pullEntity = resolvePullEntity(currentPreferredPullUuid) ?: return Vec3.ZERO
+        if (pullEntity.position().distanceToSqr(currentPosition) > PULL_SEARCH_RADIUS * PULL_SEARCH_RADIUS) {
+            return Vec3.ZERO
+        }
+
+        val headingInfluence = normalizeOrFallback(
+            pullEntity.getPullHeading(),
+            getMovementHeading(currentVelocity),
+        ).scale(PULL_HEADING_WEIGHT)
+        val tetherInfluence = pullEntity.position().subtract(currentPosition).scale(PULL_TETHER_WEIGHT)
+
+        return headingInfluence.add(tetherInfluence)
+    }
 
     private fun detectPredatorThreat(): Vec3? = null
+
+    private fun rescorePreferredPullIfNeeded(currentPosition: Vec3, currentVelocity: Vec3) {
+        if (pullRescoreCooldownTicks > 0) {
+            pullRescoreCooldownTicks--
+            return
+        }
+
+        pullRescoreCooldownTicks = PULL_RESCORE_INTERVAL - 1
+        val codHeading = getMovementHeading(currentVelocity)
+        val nearbyPulls = getNearbyPullEntities(currentPosition, PULL_SEARCH_RADIUS)
+
+        if (nearbyPulls.isEmpty()) {
+            if (currentPreferredPullUuid != null) {
+                currentPreferredPullMissingRescoreCount++
+                if (currentPreferredPullMissingRescoreCount >= PULL_MISSING_CLEAR_RESCORING) {
+                    clearCurrentPreferredPull()
+                }
+            }
+            clearCandidatePullPreference()
+            updatePullAffinityHistory()
+            return
+        }
+
+        val scoredPulls = nearbyPulls
+            .map { pullEntity -> ScoredPull(pullEntity, computePullScore(pullEntity, currentPosition, codHeading)) }
+        val bestCandidate = scoredPulls.maxByOrNull { it.score } ?: run {
+            updatePullAffinityHistory()
+            return
+        }
+        val currentPreferredScore = currentPreferredPullUuid?.let { preferredUuid ->
+            scoredPulls.firstOrNull { it.pullEntity.uuid == preferredUuid }
+        }
+
+        when {
+            currentPreferredPullUuid == null -> {
+                currentPreferredPullMissingRescoreCount = 0
+                clearCandidatePullPreference()
+
+                if (bestCandidate.score >= PULL_ADOPT_SCORE_THRESHOLD) {
+                    currentPreferredPullUuid = bestCandidate.pullEntity.uuid
+                }
+            }
+
+            currentPreferredScore == null -> {
+                currentPreferredPullMissingRescoreCount++
+                clearCandidatePullPreference()
+
+                if (currentPreferredPullMissingRescoreCount >= PULL_MISSING_CLEAR_RESCORING) {
+                    clearCurrentPreferredPull()
+                    if (bestCandidate.score >= PULL_ADOPT_SCORE_THRESHOLD) {
+                        currentPreferredPullUuid = bestCandidate.pullEntity.uuid
+                    }
+                }
+            }
+
+            bestCandidate.pullEntity.uuid == currentPreferredPullUuid -> {
+                currentPreferredPullMissingRescoreCount = 0
+                clearCandidatePullPreference()
+            }
+
+            bestCandidate.score >= currentPreferredScore.score + PULL_SWITCH_SCORE_MARGIN -> {
+                currentPreferredPullMissingRescoreCount = 0
+                if (candidatePullEntityUuid == bestCandidate.pullEntity.uuid) {
+                    candidatePreferredPullRescoreCount++
+                } else {
+                    candidatePullEntityUuid = bestCandidate.pullEntity.uuid
+                    candidatePreferredPullRescoreCount = 1
+                }
+
+                if (candidatePreferredPullRescoreCount >= PULL_CANDIDATE_DWELL_RESCORING) {
+                    currentPreferredPullUuid = bestCandidate.pullEntity.uuid
+                    currentPreferredPullMissingRescoreCount = 0
+                    clearCandidatePullPreference()
+                }
+            }
+
+            else -> {
+                currentPreferredPullMissingRescoreCount = 0
+                clearCandidatePullPreference()
+            }
+        }
+
+        updatePullAffinityHistory()
+    }
+
+    private fun computePullScore(
+        pullEntity: BoidCodPullEntity,
+        currentPosition: Vec3,
+        codHeading: Vec3,
+    ): Double {
+        val distance = pullEntity.position().distanceTo(currentPosition)
+        val distanceScore = 1.0 - Mth.clamp(distance / PULL_SEARCH_RADIUS, 0.0, 1.0)
+        val headingDot = Mth.clamp(codHeading.dot(pullEntity.getPullHeading()), -1.0, 1.0)
+        val headingScore = (headingDot + 1.0) * 0.5
+        val sizeScore = Mth.clamp(pullEntity.getSmoothedFollowerCount() / PULL_SIZE_SCORE_DIVISOR, 0.0f, 1.0f).toDouble()
+        val historyScore = Mth.clamp(pullAffinityHistory[pullEntity.uuid] ?: 0.0f, 0.0f, 1.0f).toDouble()
+
+        return distanceScore * PULL_DISTANCE_SCORE_WEIGHT +
+            headingScore * PULL_HEADING_SCORE_WEIGHT +
+            sizeScore * PULL_SIZE_SCORE_WEIGHT +
+            historyScore * PULL_HISTORY_SCORE_WEIGHT
+    }
+
+    private fun resolvePullEntity(uuid: UUID?): BoidCodPullEntity? {
+        val pullUuid = uuid ?: return null
+        val serverLevel = level() as? net.minecraft.server.level.ServerLevel ?: return null
+        return serverLevel.getEntity(pullUuid) as? BoidCodPullEntity
+    }
+
+    private fun getNearbyPullEntities(currentPosition: Vec3, radius: Double): List<BoidCodPullEntity> {
+        val searchBox = AABB.ofSize(currentPosition, radius * 2.0, radius * 2.0, radius * 2.0)
+        return level().getEntitiesOfClass(BoidCodPullEntity::class.java, searchBox)
+            .asSequence()
+            .filter { it.isAlive }
+            .sortedBy { it.position().distanceToSqr(currentPosition) }
+            .toList()
+    }
+
+    private fun clearCurrentPreferredPull() {
+        currentPreferredPullUuid = null
+        currentPreferredPullMissingRescoreCount = 0
+        clearCandidatePullPreference()
+    }
+
+    private fun clearCandidatePullPreference() {
+        candidatePullEntityUuid = null
+        candidatePreferredPullRescoreCount = 0
+    }
+
+    private fun updatePullAffinityHistory() {
+        pullAffinityHistory.entries.toList().forEach { (uuid, affinity) ->
+            val decayedAffinity = affinity * PULL_HISTORY_DECAY
+            if (decayedAffinity < PULL_HISTORY_PRUNE_THRESHOLD) {
+                pullAffinityHistory.remove(uuid)
+            } else {
+                pullAffinityHistory[uuid] = decayedAffinity
+            }
+        }
+
+        currentPreferredPullUuid?.let { preferredUuid ->
+            val seededAffinity = pullAffinityHistory.getOrDefault(preferredUuid, 0.0f) + PULL_HISTORY_GAIN
+            pullAffinityHistory[preferredUuid] = Mth.clamp(seededAffinity, 0.0f, 1.0f)
+        }
+
+        prunePullAffinityHistory()
+    }
+
+    private fun prunePullAffinityHistory() {
+        val retainedEntries = pullAffinityHistory.entries
+            .filter { it.value >= PULL_HISTORY_PRUNE_THRESHOLD }
+            .sortedByDescending { it.value }
+            .take(PULL_HISTORY_MAX_ENTRIES)
+
+        pullAffinityHistory.clear()
+        retainedEntries.forEach { entry ->
+            pullAffinityHistory[entry.key] = entry.value
+        }
+    }
 
     private fun normalizeOrFallback(vector: Vec3, fallback: Vec3): Vec3 {
         if (vector.lengthSqr() <= 1.0e-6) {
@@ -418,6 +658,24 @@ open class BoidCodEntity(
         private const val CRUISE_MEMORY_WEIGHT = 0.35
         private const val CRUISE_VERTICAL_DAMPING = 0.35
         private const val CRUISE_VERTICAL_NEIGHBOUR_BLEND = 0.15
+        private const val PULL_SEARCH_RADIUS = 48.0
+        private const val PULL_HEADING_WEIGHT = 0.065
+        private const val PULL_TETHER_WEIGHT = 0.018
+        private const val PULL_RESCORE_INTERVAL = 10
+        private const val PULL_ADOPT_SCORE_THRESHOLD = 0.20
+        private const val PULL_SWITCH_SCORE_MARGIN = 0.12
+        private const val PULL_CANDIDATE_DWELL_RESCORING = 3
+        private const val PULL_MISSING_CLEAR_RESCORING = 6
+        private const val PULL_SIZE_SCORE_DIVISOR = 16.0f
+        private const val PULL_DISTANCE_SCORE_WEIGHT = 0.45
+        private const val PULL_HEADING_SCORE_WEIGHT = 0.20
+        private const val PULL_SIZE_SCORE_WEIGHT = 0.10
+        private const val PULL_HISTORY_SCORE_WEIGHT = 0.25
+        private const val PULL_HISTORY_DECAY = 0.96f
+        private const val PULL_HISTORY_GAIN = 0.08f
+        private const val PULL_HISTORY_PRUNE_THRESHOLD = 0.05f
+        private const val PULL_HISTORY_MAX_ENTRIES = 4
+        private const val CRUISE_INITIAL_SPEED = 0.09
 
         @JvmStatic
         @JvmName("createBoidCodAttributes")

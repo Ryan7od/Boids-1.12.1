@@ -1,4 +1,7 @@
 {
   "entity.boids.boid_cod": "Boid Cod",
-  "item.boids.boid_cod_spawn_egg": "Boid Cod Spawn Egg"
+  "entity.boids.boid_cod_pull": "Boid Cod Pull",
+  "item.boids.boid_cod_spawn_egg": "Boid Cod Spawn Egg",
+  "item.boids.boid_cod_school_spawn_egg": "Boid Cod School Spawn Egg",
+  "item.boids.boid_cod_pull_spawn_egg": "Boid Cod Pull Spawn Egg"
 }
