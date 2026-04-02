@@ -8,6 +8,7 @@ import net.minecraft.world.InteractionResultHolder
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.item.Item
 import net.minecraft.world.item.ItemStack
+import net.minecraft.world.item.SpawnEggItem
 import net.minecraft.world.item.context.UseOnContext
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.Level
@@ -16,7 +17,8 @@ import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
 import net.minecraft.server.level.ServerLevel
 
-class BoidCodSchoolSpawnEggItem(properties: Item.Properties) : Item(properties) {
+class BoidCodSchoolSpawnEggItem(properties: Item.Properties) :
+    SpawnEggItem(BoidEntityTypes.BOID_COD, PRIMARY_COLOR, SECONDARY_COLOR, properties) {
     override fun useOn(context: UseOnContext): InteractionResult {
         val level = context.level
         val clickedPos = context.clickedPos
