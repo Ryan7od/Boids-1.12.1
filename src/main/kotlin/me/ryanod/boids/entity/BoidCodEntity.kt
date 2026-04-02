@@ -18,7 +18,7 @@ import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.Vec3
 import kotlin.jvm.JvmName
 
-class BoidCodEntity(
+open class BoidCodEntity(
     entityType: EntityType<out BoidCodEntity>,
     level: Level,
 ) : AbstractBoidFishEntity(entityType, level) {
@@ -46,6 +46,7 @@ class BoidCodEntity(
     private var stateTicksRemaining = 0
     private var wanderTicksRemaining = 0
     private var currentWanderOffset = Vec3.ZERO
+    private var lastCruiseHeading = Vec3(0.0, 0.0, 1.0)
 
     override fun getAmbientSound(): SoundEvent = SoundEvents.COD_AMBIENT
 
@@ -56,22 +57,42 @@ class BoidCodEntity(
     override fun getFlopSound(): SoundEvent = SoundEvents.COD_FLOP
 
     override fun updateMovementSystem() {
-        val neighbours = getOtherBoidCods(PERCEPTION_RADIUS, K_NEAREST)
         updateMovementState()
 
         val movementProfile = getMovementProfile()
         updateWanderOffset(movementProfile)
 
+        val currentPosition = getBoidPosition()
         val currentVelocity = getBoidVelocity()
-        val stateDrive = computeStateDrive(movementProfile, currentVelocity)
-        val boidSteering = updateBoidMovement(neighbours)
-        val preliminaryVelocity = stateDrive.add(boidSteering)
-        val obstacleAvoidance = computeObstacleAvoidance(preliminaryVelocity, movementProfile)
-        val desiredVelocity = preliminaryVelocity.add(obstacleAvoidance)
+        val farNeighbours = getOtherBoidCods(CRUISE_FAR_RADIUS, CRUISE_FAR_K)
+        val nearNeighbours = farNeighbours
+            .asSequence()
+            .filter { getBoidPosition(it).distanceToSqr(currentPosition) <= CRUISE_NEAR_RADIUS * CRUISE_NEAR_RADIUS }
+            .take(CRUISE_NEAR_K)
+            .toList()
+
+        val cruiseDrive = computeCruiseDrive(currentPosition, currentVelocity, nearNeighbours, farNeighbours, movementProfile)
+        val boidSteering = updateBoidMovement(nearNeighbours)
+        val combinedVelocity = cruiseDrive.add(boidSteering)
+        val obstacleAvoidance = computeObstacleAvoidance(combinedVelocity, movementProfile)
+        var desiredVelocity = combinedVelocity.add(obstacleAvoidance)
+
+        if (nearNeighbours.isNotEmpty()) {
+            val averageNeighbourVelocity = averageVector(nearNeighbours.map(::getBoidVelocity))
+            desiredVelocity = Vec3(
+                desiredVelocity.x,
+                Mth.lerp(CRUISE_VERTICAL_NEIGHBOUR_BLEND, desiredVelocity.y, averageNeighbourVelocity.y),
+                desiredVelocity.z,
+            )
+        }
+
+        desiredVelocity = desiredVelocity.multiply(1.0, CRUISE_VERTICAL_DAMPING, 1.0)
+
         val finalVelocity = clampVelocity(currentVelocity, desiredVelocity, movementProfile)
 
         setDeltaMovement(finalVelocity)
         hasImpulse = true
+        lastCruiseHeading = normalizeOrFallback(finalVelocity, lastCruiseHeading)
         updateYawFromVelocity(finalVelocity, movementProfile.turnResponse)
     }
 
@@ -128,34 +149,13 @@ class BoidCodEntity(
     protected fun getBoidVelocity(boid: BoidCodEntity = this): Vec3 = boid.deltaMovement
 
     private fun updateMovementState() {
-        val predatorThreat = detectPredatorThreat()
-
-        if (predatorThreat != null) {
-            enterMovementState(MovementState.FLEE_PREDATOR, randomTicks(30, 50))
-            return
+        if (movementState != MovementState.CRUISE) {
+            movementState = MovementState.CRUISE
+            currentWanderOffset = Vec3.ZERO
+            wanderTicksRemaining = 0
         }
 
-        if (stateTicksRemaining > 0) {
-            stateTicksRemaining--
-        }
-
-        when (movementState) {
-            MovementState.CRUISE -> {
-                if (random.nextInt(160) == 0) {
-                    enterMovementState(MovementState.STAGNANT, randomTicks(30, 60))
-                }
-            }
-            MovementState.STAGNANT -> {
-                if (stateTicksRemaining <= 0) {
-                    enterMovementState(MovementState.CRUISE, 0)
-                }
-            }
-            MovementState.FLEE_PREDATOR -> {
-                if (stateTicksRemaining <= 0) {
-                    enterMovementState(MovementState.CRUISE, 0)
-                }
-            }
-        }
+        stateTicksRemaining = 0
     }
 
     private fun enterMovementState(newState: MovementState, durationTicks: Int) {
@@ -171,17 +171,17 @@ class BoidCodEntity(
     private fun getMovementProfile(): MovementProfile =
         when (movementState) {
             MovementState.CRUISE -> MovementProfile(
-                preferredSpeed = 0.085,
-                minSpeed = 0.05,
-                maxSpeed = 0.12,
-                turnResponse = 0.12,
-                wanderStrength = 0.014,
-                wanderRefreshMinTicks = 25,
-                wanderRefreshMaxTicks = 50,
-                wanderHorizontalJitter = 1.0,
-                wanderVerticalJitter = 0.18,
+                preferredSpeed = 0.09,
+                minSpeed = 0.06,
+                maxSpeed = 0.115,
+                turnResponse = 0.1,
+                wanderStrength = 0.0035,
+                wanderRefreshMinTicks = 40,
+                wanderRefreshMaxTicks = 80,
+                wanderHorizontalJitter = 0.35,
+                wanderVerticalJitter = 0.05,
                 probeDistance = 1.15,
-                avoidanceStrength = 0.05,
+                avoidanceStrength = 0.035,
             )
             MovementState.STAGNANT -> MovementProfile(
                 preferredSpeed = 0.03,
@@ -225,14 +225,41 @@ class BoidCodEntity(
         wanderTicksRemaining = randomTicks(profile.wanderRefreshMinTicks, profile.wanderRefreshMaxTicks)
     }
 
-    private fun computeStateDrive(profile: MovementProfile, currentVelocity: Vec3): Vec3 {
-        val heading = when (movementState) {
-            MovementState.FLEE_PREDATOR -> getPredatorEscapeHeading(currentVelocity)
-            MovementState.CRUISE, MovementState.STAGNANT -> getMovementHeading(currentVelocity)
+    private fun computeCruiseDrive(
+        currentPosition: Vec3,
+        currentVelocity: Vec3,
+        nearNeighbours: List<BoidCodEntity>,
+        farNeighbours: List<BoidCodEntity>,
+        profile: MovementProfile,
+    ): Vec3 {
+        val baseHeading = if (nearNeighbours.size >= REJOIN_MIN_NEIGHBOURS) {
+            val averageNeighbourHeading = normalizeOrFallback(averageVector(nearNeighbours.map(::getBoidVelocity)), lastCruiseHeading)
+            normalizeOrFallback(
+                lastCruiseHeading.scale(CRUISE_MEMORY_WEIGHT)
+                    .add(averageNeighbourHeading.scale(1.0 - CRUISE_MEMORY_WEIGHT)),
+                averageNeighbourHeading,
+            )
+        } else {
+            lastCruiseHeading
         }
 
-        return heading.scale(profile.preferredSpeed)
-            .add(currentWanderOffset.scale(profile.wanderStrength))
+        val wanderedHeading = normalizeOrFallback(
+            baseHeading.add(currentWanderOffset.scale(profile.wanderStrength)),
+            baseHeading,
+        )
+        val nearCentroid = averageVector(nearNeighbours.map(::getBoidPosition))
+        val centroidFollow = if (nearNeighbours.isEmpty()) {
+            Vec3.ZERO
+        } else {
+            nearCentroid.subtract(currentPosition).scale(CENTROID_FOLLOW_WEIGHT)
+        }
+        val rejoinInfluence = computeRejoinInfluence(currentPosition, nearNeighbours, farNeighbours)
+        val externalInfluence = computeExternalSchoolInfluence(currentPosition, currentVelocity)
+
+        return wanderedHeading.scale(profile.preferredSpeed)
+            .add(centroidFollow)
+            .add(rejoinInfluence)
+            .add(externalInfluence)
     }
 
     private fun computeObstacleAvoidance(
@@ -291,6 +318,19 @@ class BoidCodEntity(
         return blendedDirection.scale(desiredSpeed)
     }
 
+    private fun computeRejoinInfluence(
+        currentPosition: Vec3,
+        nearNeighbours: List<BoidCodEntity>,
+        farNeighbours: List<BoidCodEntity>,
+    ): Vec3 {
+        if (nearNeighbours.size >= REJOIN_MIN_NEIGHBOURS || farNeighbours.isEmpty()) {
+            return Vec3.ZERO
+        }
+
+        val farCentroid = averageVector(farNeighbours.map(::getBoidPosition))
+        return farCentroid.subtract(currentPosition).scale(REJOIN_WEIGHT)
+    }
+
     private fun updateYawFromVelocity(velocity: Vec3, turnResponse: Double) {
         if (velocity.horizontalDistanceSqr() <= 1.0e-6) {
             return
@@ -318,6 +358,10 @@ class BoidCodEntity(
             return referenceVelocity.normalize()
         }
 
+        if (lastCruiseHeading.lengthSqr() > 1.0e-6) {
+            return lastCruiseHeading
+        }
+
         return Vec3.directionFromRotation(0.0f, yRot)
     }
 
@@ -331,6 +375,8 @@ class BoidCodEntity(
     }
 
     private fun getProbeOrigin(): Vec3 = position().add(0.0, bbHeight * 0.5, 0.0)
+
+    protected open fun computeExternalSchoolInfluence(currentPosition: Vec3, currentVelocity: Vec3): Vec3 = Vec3.ZERO
 
     private fun detectPredatorThreat(): Vec3? = null
 
@@ -358,12 +404,20 @@ class BoidCodEntity(
     }
 
     companion object {
-        private const val PERCEPTION_RADIUS = 4.0
-        private const val K_NEAREST = 12
-        private const val SEPARATION_RADIUS = 0.75
-        private const val SEPARATION_WEIGHT = 0.05
-        private const val ALIGNMENT_WEIGHT = 0.035
-        private const val COHESION_WEIGHT = 0.012
+        private const val CRUISE_NEAR_RADIUS = 5.5
+        private const val CRUISE_NEAR_K = 12
+        private const val CRUISE_FAR_RADIUS = 12.0
+        private const val CRUISE_FAR_K = 24
+        private const val REJOIN_MIN_NEIGHBOURS = 3
+        private const val SEPARATION_RADIUS = 0.6
+        private const val SEPARATION_WEIGHT = 0.03
+        private const val ALIGNMENT_WEIGHT = 0.09
+        private const val COHESION_WEIGHT = 0.045
+        private const val CENTROID_FOLLOW_WEIGHT = 0.018
+        private const val REJOIN_WEIGHT = 0.035
+        private const val CRUISE_MEMORY_WEIGHT = 0.35
+        private const val CRUISE_VERTICAL_DAMPING = 0.35
+        private const val CRUISE_VERTICAL_NEIGHBOUR_BLEND = 0.15
 
         @JvmStatic
         @JvmName("createBoidCodAttributes")

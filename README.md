@@ -1,2 +1,3 @@
 Boid cod
-All world search
+dual radius rejoin
+state machine
