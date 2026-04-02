@@ -47,7 +47,6 @@ abstract class AbstractSchoolPullEntity(
     init {
         noPhysics = true
         setNoGravity(true)
-        setInvisible(true)
     }
 
     override fun defineSynchedData(builder: SynchedEntityData.Builder) = Unit
@@ -57,7 +56,6 @@ abstract class AbstractSchoolPullEntity(
 
         noPhysics = true
         setNoGravity(true)
-        setInvisible(true)
 
         if (level().isClientSide) {
             return

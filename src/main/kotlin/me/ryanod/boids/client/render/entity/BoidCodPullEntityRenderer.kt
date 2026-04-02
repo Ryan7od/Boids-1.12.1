@@ -36,7 +36,7 @@ class BoidCodPullEntityRenderer(
         x: Double,
         y: Double,
         z: Double,
-    ): Boolean = entity.isAlive
+    ): Boolean = true
 
     override fun getTextureLocation(entity: BoidCodPullEntity): ResourceLocation = TEXTURE
 
