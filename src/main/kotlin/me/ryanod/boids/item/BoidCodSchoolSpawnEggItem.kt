@@ -19,6 +19,8 @@ import net.minecraft.server.level.ServerLevel
 
 class BoidCodSchoolSpawnEggItem(properties: Item.Properties) :
     SpawnEggItem(BoidEntityTypes.BOID_COD, PRIMARY_COLOR, SECONDARY_COLOR, properties) {
+    override fun getColor(tintIndex: Int): Int = 0xFFFFFF
+
     override fun useOn(context: UseOnContext): InteractionResult {
         val level = context.level
         val clickedPos = context.clickedPos
