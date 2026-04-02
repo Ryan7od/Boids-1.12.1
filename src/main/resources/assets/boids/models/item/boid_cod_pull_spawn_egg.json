@@ -1,7 +1,7 @@
 {
   "parent": "minecraft:item/generated",
   "textures": {
-    "layer0": "boids:item/boid_cod_spawn_egg",
-    "layer1": "boids:item/boid_cod_spawn_egg_overlay"
+    "layer0": "boids:item/boid_cod_pull_spawn_egg",
+    "layer1": "boids:item/boid_cod_pull_spawn_egg_overlay"
   }
 }
