@@ -24,30 +24,14 @@ open class BoidCodEntity(
     entityType: EntityType<out BoidCodEntity>,
     level: Level,
 ) : AbstractBoidFishEntity(entityType, level) {
-    private enum class MovementState {
-        CRUISE,
-        STAGNANT,
-        FLEE_PREDATOR,
-    }
-
     private data class MovementProfile(
-        val preferredSpeed: Double,
         val minSpeed: Double,
         val maxSpeed: Double,
         val turnResponse: Double,
-        val wanderStrength: Double,
-        val wanderRefreshMinTicks: Int,
-        val wanderRefreshMaxTicks: Int,
-        val wanderHorizontalJitter: Double,
-        val wanderVerticalJitter: Double,
         val probeDistance: Double,
         val avoidanceStrength: Double,
     )
 
-    private var movementState = MovementState.CRUISE
-    private var stateTicksRemaining = 0
-    private var wanderTicksRemaining = 0
-    private var currentWanderOffset = Vec3.ZERO
     private var lastCruiseHeading = Vec3(0.0, 0.0, 1.0)
     private var currentPreferredPullUuid: UUID? = null
     private var candidatePullEntityUuid: UUID? = null
@@ -90,10 +74,7 @@ open class BoidCodEntity(
     fun getCurrentPreferredPullUuid(): UUID? = currentPreferredPullUuid
 
     override fun updateMovementSystem() {
-        updateMovementState()
-
         val movementProfile = getMovementProfile()
-        updateWanderOffset(movementProfile)
 
         val currentPosition = getBoidPosition()
         val currentVelocity = getBoidVelocity()
@@ -104,22 +85,32 @@ open class BoidCodEntity(
             .take(CRUISE_NEAR_K)
             .toList()
 
-        val cruiseDrive = computeCruiseDrive(currentPosition, currentVelocity, nearNeighbours, farNeighbours, movementProfile)
-        val boidSteering = updateBoidMovement(nearNeighbours)
-        val combinedVelocity = cruiseDrive.add(boidSteering)
-        val obstacleAvoidance = computeObstacleAvoidance(combinedVelocity, movementProfile)
-        var desiredVelocity = combinedVelocity.add(obstacleAvoidance)
+        val schoolInfluence = computeSchoolInfluence(currentPosition, currentVelocity, nearNeighbours, farNeighbours)
+        val boidInfluence = updateBoidMovement(nearNeighbours)
+        val objectAvoidanceInfluence = computeObstacleAvoidance(
+            schoolInfluence
+                .scale(SCHOOL_WEIGHT)
+                .add(boidInfluence.scale(BOID_WEIGHT)),
+            movementProfile,
+        )
+        val fleeInfluence = computeFleeInfluence(currentPosition, currentVelocity)
+        val fleeWeight = getFleeWeight()
+        var desiredVelocity = schoolInfluence
+            .scale(SCHOOL_WEIGHT)
+            .add(boidInfluence.scale(BOID_WEIGHT))
+            .add(objectAvoidanceInfluence.scale(OBJECT_AVOIDANCE_WEIGHT))
+            .add(fleeInfluence.scale(fleeWeight))
 
         if (nearNeighbours.isNotEmpty()) {
             val averageNeighbourVelocity = averageVector(nearNeighbours.map(::getBoidVelocity))
             desiredVelocity = Vec3(
                 desiredVelocity.x,
-                Mth.lerp(CRUISE_VERTICAL_NEIGHBOUR_BLEND, desiredVelocity.y, averageNeighbourVelocity.y),
+                Mth.lerp(FISH_VERTICAL_NEIGHBOUR_BLEND, desiredVelocity.y, averageNeighbourVelocity.y),
                 desiredVelocity.z,
             )
         }
 
-        desiredVelocity = desiredVelocity.multiply(1.0, CRUISE_VERTICAL_DAMPING, 1.0)
+        desiredVelocity = desiredVelocity.multiply(1.0, FISH_VERTICAL_DAMPING, 1.0)
 
         val finalVelocity = clampVelocity(currentVelocity, desiredVelocity, movementProfile)
 
@@ -215,105 +206,32 @@ open class BoidCodEntity(
         prunePullAffinityHistory()
     }
 
-    private fun updateMovementState() {
-        if (movementState != MovementState.CRUISE) {
-            movementState = MovementState.CRUISE
-            currentWanderOffset = Vec3.ZERO
-            wanderTicksRemaining = 0
-        }
-
-        stateTicksRemaining = 0
-    }
-
-    private fun enterMovementState(newState: MovementState, durationTicks: Int) {
-        if (movementState != newState) {
-            movementState = newState
-            currentWanderOffset = Vec3.ZERO
-            wanderTicksRemaining = 0
-        }
-
-        stateTicksRemaining = durationTicks
-    }
-
     private fun getMovementProfile(): MovementProfile =
-        when (movementState) {
-            MovementState.CRUISE -> MovementProfile(
-                preferredSpeed = 0.09,
-                minSpeed = 0.06,
-                maxSpeed = 0.115,
-                turnResponse = 0.1,
-                wanderStrength = 0.0035,
-                wanderRefreshMinTicks = 40,
-                wanderRefreshMaxTicks = 80,
-                wanderHorizontalJitter = 0.35,
-                wanderVerticalJitter = 0.05,
-                probeDistance = 1.15,
-                avoidanceStrength = 0.035,
-            )
-            MovementState.STAGNANT -> MovementProfile(
-                preferredSpeed = 0.03,
-                minSpeed = 0.015,
-                maxSpeed = 0.05,
-                turnResponse = 0.08,
-                wanderStrength = 0.01,
-                wanderRefreshMinTicks = 12,
-                wanderRefreshMaxTicks = 24,
-                wanderHorizontalJitter = 0.65,
-                wanderVerticalJitter = 0.12,
-                probeDistance = 0.9,
-                avoidanceStrength = 0.04,
-            )
-            MovementState.FLEE_PREDATOR -> MovementProfile(
-                preferredSpeed = 0.14,
-                minSpeed = 0.11,
-                maxSpeed = 0.19,
-                turnResponse = 0.22,
-                wanderStrength = 0.004,
-                wanderRefreshMinTicks = 8,
-                wanderRefreshMaxTicks = 16,
-                wanderHorizontalJitter = 0.4,
-                wanderVerticalJitter = 0.1,
-                probeDistance = 1.5,
-                avoidanceStrength = 0.08,
-            )
-        }
-
-    private fun updateWanderOffset(profile: MovementProfile) {
-        if (wanderTicksRemaining > 0) {
-            wanderTicksRemaining--
-            return
-        }
-
-        currentWanderOffset = Vec3(
-            (random.nextDouble() - 0.5) * profile.wanderHorizontalJitter,
-            (random.nextDouble() - 0.5) * profile.wanderVerticalJitter,
-            (random.nextDouble() - 0.5) * profile.wanderHorizontalJitter,
+        MovementProfile(
+            minSpeed = 0.06,
+            maxSpeed = 0.115,
+            turnResponse = 0.1,
+            probeDistance = 1.15,
+            avoidanceStrength = 0.035,
         )
-        wanderTicksRemaining = randomTicks(profile.wanderRefreshMinTicks, profile.wanderRefreshMaxTicks)
-    }
 
-    private fun computeCruiseDrive(
+    private fun computeSchoolInfluence(
         currentPosition: Vec3,
         currentVelocity: Vec3,
         nearNeighbours: List<BoidCodEntity>,
         farNeighbours: List<BoidCodEntity>,
-        profile: MovementProfile,
     ): Vec3 {
-        val baseHeading = if (nearNeighbours.size >= REJOIN_MIN_NEIGHBOURS) {
-            val averageNeighbourHeading = normalizeOrFallback(averageVector(nearNeighbours.map(::getBoidVelocity)), lastCruiseHeading)
-            normalizeOrFallback(
-                lastCruiseHeading.scale(CRUISE_MEMORY_WEIGHT)
-                    .add(averageNeighbourHeading.scale(1.0 - CRUISE_MEMORY_WEIGHT)),
-                averageNeighbourHeading,
-            )
-        } else {
-            lastCruiseHeading
-        }
-
-        val wanderedHeading = normalizeOrFallback(
-            baseHeading.add(currentWanderOffset.scale(profile.wanderStrength)),
-            baseHeading,
+        val preferredPull = resolvePreferredPullEntity(currentPosition, currentVelocity)
+        val schoolHeading = preferredPull?.getPullHeading() ?: lastCruiseHeading
+        val headingBlend = normalizeOrFallback(
+            lastCruiseHeading.scale(FISH_HEADING_MEMORY_WEIGHT)
+                .add(schoolHeading.scale(1.0 - FISH_HEADING_MEMORY_WEIGHT)),
+            schoolHeading,
         )
+
+        val directionAlignmentMultiplier = preferredPull?.getSchoolDirectionMultiplier()?.toDouble() ?: 1.0
+        val forwardDrive = headingBlend.scale(FISH_BASE_SCHOOL_SPEED * directionAlignmentMultiplier)
+
         val nearCentroid = averageVector(nearNeighbours.map(::getBoidPosition))
         val centroidFollow = if (nearNeighbours.isEmpty()) {
             Vec3.ZERO
@@ -323,7 +241,7 @@ open class BoidCodEntity(
         val rejoinInfluence = computeRejoinInfluence(currentPosition, nearNeighbours, farNeighbours)
         val externalInfluence = computeExternalSchoolInfluence(currentPosition, currentVelocity)
 
-        return wanderedHeading.scale(profile.preferredSpeed)
+        return forwardDrive
             .add(centroidFollow)
             .add(rejoinInfluence)
             .add(externalInfluence)
@@ -444,23 +362,34 @@ open class BoidCodEntity(
     private fun getProbeOrigin(): Vec3 = position().add(0.0, bbHeight * 0.5, 0.0)
 
     protected open fun computeExternalSchoolInfluence(currentPosition: Vec3, currentVelocity: Vec3): Vec3 {
-        rescorePreferredPullIfNeeded(currentPosition, currentVelocity)
-
-        val pullEntity = resolvePullEntity(currentPreferredPullUuid) ?: return Vec3.ZERO
+        val pullEntity = resolvePreferredPullEntity(currentPosition, currentVelocity) ?: return Vec3.ZERO
         if (pullEntity.position().distanceToSqr(currentPosition) > PULL_SEARCH_RADIUS * PULL_SEARCH_RADIUS) {
             return Vec3.ZERO
         }
 
+        val schoolDirectionMultiplier = pullEntity.getSchoolDirectionMultiplier().toDouble()
+        val schoolTetherMultiplier = pullEntity.getSchoolTetherMultiplier().toDouble()
         val headingInfluence = normalizeOrFallback(
             pullEntity.getPullHeading(),
             getMovementHeading(currentVelocity),
-        ).scale(PULL_HEADING_WEIGHT)
-        val tetherInfluence = pullEntity.position().subtract(currentPosition).scale(PULL_TETHER_WEIGHT)
+        ).scale(PULL_HEADING_WEIGHT * schoolDirectionMultiplier)
+        val tetherInfluence = pullEntity.position()
+            .subtract(currentPosition)
+            .scale(PULL_TETHER_WEIGHT * schoolTetherMultiplier)
 
         return headingInfluence.add(tetherInfluence)
     }
 
     private fun detectPredatorThreat(): Vec3? = null
+
+    private fun computeFleeInfluence(currentPosition: Vec3, currentVelocity: Vec3): Vec3 = Vec3.ZERO
+
+    private fun getFleeWeight(): Double = 0.0
+
+    private fun resolvePreferredPullEntity(currentPosition: Vec3, currentVelocity: Vec3): BoidCodPullEntity? {
+        rescorePreferredPullIfNeeded(currentPosition, currentVelocity)
+        return resolvePullEntity(currentPreferredPullUuid)
+    }
 
     private fun rescorePreferredPullIfNeeded(currentPosition: Vec3, currentVelocity: Vec3) {
         if (pullRescoreCooldownTicks > 0) {
@@ -635,9 +564,6 @@ open class BoidCodEntity(
             vector.normalize()
         }
 
-    private fun randomTicks(minTicks: Int, maxTicks: Int): Int =
-        minTicks + random.nextInt(maxTicks - minTicks + 1)
-
     private fun lerpAngle(current: Float, target: Float, alpha: Float): Float {
         val delta = Mth.wrapDegrees(target - current)
         return current + alpha * delta
@@ -655,9 +581,13 @@ open class BoidCodEntity(
         private const val COHESION_WEIGHT = 0.045
         private const val CENTROID_FOLLOW_WEIGHT = 0.018
         private const val REJOIN_WEIGHT = 0.035
-        private const val CRUISE_MEMORY_WEIGHT = 0.35
-        private const val CRUISE_VERTICAL_DAMPING = 0.35
-        private const val CRUISE_VERTICAL_NEIGHBOUR_BLEND = 0.15
+        private const val SCHOOL_WEIGHT = 1.0
+        private const val BOID_WEIGHT = 1.0
+        private const val OBJECT_AVOIDANCE_WEIGHT = 1.0
+        private const val FISH_HEADING_MEMORY_WEIGHT = 0.35
+        private const val FISH_VERTICAL_DAMPING = 0.35
+        private const val FISH_VERTICAL_NEIGHBOUR_BLEND = 0.15
+        private const val FISH_BASE_SCHOOL_SPEED = 0.09
         private const val PULL_SEARCH_RADIUS = 48.0
         private const val PULL_HEADING_WEIGHT = 0.065
         private const val PULL_TETHER_WEIGHT = 0.018

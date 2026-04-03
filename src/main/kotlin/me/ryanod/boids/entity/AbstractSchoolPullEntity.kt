@@ -18,15 +18,32 @@ abstract class AbstractSchoolPullEntity(
     entityType: EntityType<out AbstractSchoolPullEntity>,
     level: Level,
 ) : Entity(entityType, level) {
-    protected data class PullMovementProfile(
+    protected enum class SchoolPullState {
+        CRUISE,
+        LOITER,
+    }
+
+    protected data class PullStateProfile(
         val forwardSpeed: Double,
         val maxTurnRateDeg: Double,
         val turnAccelerationDeg: Double,
         val retargetMinTicks: Int,
         val retargetMaxTicks: Int,
+        val turnBiasGain: Double,
+    )
+
+    protected data class PullMovementProfile(
+        val cruise: PullStateProfile,
+        val loiter: PullStateProfile,
+        val cruiseMinTicks: Int,
+        val cruiseMaxTicks: Int,
+        val loiterMinTicks: Int,
+        val loiterMaxTicks: Int,
+        val loiterRadius: Double,
+        val loiterSchoolDirectionMultiplier: Float,
+        val loiterSchoolTetherMultiplier: Float,
         val biomeProbeDistance: Double,
         val sideProbeAngleDeg: Float,
-        val turnBiasGain: Double,
         val verticalCorrectionStrength: Double,
         val verticalDamping: Double,
         val maxVerticalSpeed: Double,
@@ -43,6 +60,10 @@ abstract class AbstractSchoolPullEntity(
     private var outsideAllowedBiomeTicks = 0
     private var recoveryTarget: Vec3? = null
     private var headingInitialized = false
+    private var stateInitialized = false
+    private var schoolPullState = SchoolPullState.CRUISE
+    private var stateTicksRemaining = 0
+    private var loiterCenter: Vec3? = null
 
     init {
         noPhysics = true
@@ -68,6 +89,13 @@ abstract class AbstractSchoolPullEntity(
         }
 
         val currentPosition = position()
+        if (!stateInitialized) {
+            enterState(SchoolPullState.CRUISE, randomStateTicks(profile.cruiseMinTicks, profile.cruiseMaxTicks), currentPosition)
+            stateInitialized = true
+        } else {
+            updateState(profile, currentPosition)
+        }
+
         val currentBlockPos = BlockPos.containing(currentPosition)
         val insideAllowedBiome = isAllowedBiome(currentBlockPos)
 
@@ -88,22 +116,28 @@ abstract class AbstractSchoolPullEntity(
 
         val steeringYaw = when {
             recoveryTarget != null -> yawTo(recoveryTarget!!)
-            else -> computeBiomeSteeringYaw(currentPosition, profile)
+            computeBiomeSteeringYaw(currentPosition, profile) != null -> computeBiomeSteeringYaw(currentPosition, profile)
+            else -> computeLoiterSteeringYaw(currentPosition, profile)
         }
+        val activeStateProfile = getActiveStateProfile(profile)
 
         if (steeringYaw != null) {
             val yawDelta = Mth.wrapDegrees(steeringYaw - headingYaw).toDouble()
-            targetTurnRateDeg = Mth.clamp(yawDelta * profile.turnBiasGain, -profile.maxTurnRateDeg, profile.maxTurnRateDeg)
+            targetTurnRateDeg = Mth.clamp(
+                yawDelta * activeStateProfile.turnBiasGain,
+                -activeStateProfile.maxTurnRateDeg,
+                activeStateProfile.maxTurnRateDeg,
+            )
         } else if (turnRetargetTicks <= 0) {
-            targetTurnRateDeg = randomTurnRate(profile)
-            turnRetargetTicks = randomRetargetTicks(profile)
+            targetTurnRateDeg = randomTurnRate(activeStateProfile)
+            turnRetargetTicks = randomRetargetTicks(activeStateProfile)
         }
 
         turnRetargetTicks--
-        currentTurnRateDeg = approach(currentTurnRateDeg, targetTurnRateDeg, profile.turnAccelerationDeg)
+        currentTurnRateDeg = approach(currentTurnRateDeg, targetTurnRateDeg, activeStateProfile.turnAccelerationDeg)
         headingYaw = Mth.wrapDegrees(headingYaw + currentTurnRateDeg.toFloat())
 
-        val horizontalVelocity = getPullHeading().scale(profile.forwardSpeed)
+        val horizontalVelocity = getPullHeading().scale(activeStateProfile.forwardSpeed)
         val verticalVelocity = computeVerticalVelocity(currentPosition, profile)
         val nextVelocity = Vec3(horizontalVelocity.x, verticalVelocity, horizontalVelocity.z)
 
@@ -133,12 +167,21 @@ abstract class AbstractSchoolPullEntity(
         tag.putInt("TurnRetargetTicks", turnRetargetTicks)
         tag.putInt("OutsideAllowedBiomeTicks", outsideAllowedBiomeTicks)
         tag.putBoolean("HeadingInitialized", headingInitialized)
+        tag.putBoolean("StateInitialized", stateInitialized)
+        tag.putInt("SchoolPullState", schoolPullState.ordinal)
+        tag.putInt("StateTicksRemaining", stateTicksRemaining)
 
         recoveryTarget?.let {
             tag.putBoolean("HasRecoveryTarget", true)
             tag.putDouble("RecoveryTargetX", it.x)
             tag.putDouble("RecoveryTargetY", it.y)
             tag.putDouble("RecoveryTargetZ", it.z)
+        }
+        loiterCenter?.let {
+            tag.putBoolean("HasLoiterCenter", true)
+            tag.putDouble("LoiterCenterX", it.x)
+            tag.putDouble("LoiterCenterY", it.y)
+            tag.putDouble("LoiterCenterZ", it.z)
         }
     }
 
@@ -149,9 +192,17 @@ abstract class AbstractSchoolPullEntity(
         turnRetargetTicks = tag.getInt("TurnRetargetTicks")
         outsideAllowedBiomeTicks = tag.getInt("OutsideAllowedBiomeTicks")
         headingInitialized = tag.getBoolean("HeadingInitialized")
+        stateInitialized = tag.getBoolean("StateInitialized")
+        schoolPullState = SchoolPullState.entries.getOrElse(tag.getInt("SchoolPullState")) { SchoolPullState.CRUISE }
+        stateTicksRemaining = tag.getInt("StateTicksRemaining")
 
         recoveryTarget = if (tag.getBoolean("HasRecoveryTarget")) {
             Vec3(tag.getDouble("RecoveryTargetX"), tag.getDouble("RecoveryTargetY"), tag.getDouble("RecoveryTargetZ"))
+        } else {
+            null
+        }
+        loiterCenter = if (tag.getBoolean("HasLoiterCenter")) {
+            Vec3(tag.getDouble("LoiterCenterX"), tag.getDouble("LoiterCenterY"), tag.getDouble("LoiterCenterZ"))
         } else {
             null
         }
@@ -162,6 +213,20 @@ abstract class AbstractSchoolPullEntity(
     protected abstract fun getPullMovementProfile(): PullMovementProfile
 
     protected abstract fun isAllowedBiome(pos: BlockPos): Boolean
+
+    fun getSchoolDirectionMultiplier(): Float =
+        if (schoolPullState == SchoolPullState.LOITER) {
+            getPullMovementProfile().loiterSchoolDirectionMultiplier
+        } else {
+            1.0f
+        }
+
+    fun getSchoolTetherMultiplier(): Float =
+        if (schoolPullState == SchoolPullState.LOITER) {
+            getPullMovementProfile().loiterSchoolTetherMultiplier
+        } else {
+            1.0f
+        }
 
     private fun computeBiomeSteeringYaw(currentPosition: Vec3, profile: PullMovementProfile): Float? {
         val forwardYaw = headingYaw
@@ -182,6 +247,21 @@ abstract class AbstractSchoolPullEntity(
             !forwardValid -> Mth.wrapDegrees(headingYaw + 180.0f)
             else -> null
         }
+    }
+
+    private fun computeLoiterSteeringYaw(currentPosition: Vec3, profile: PullMovementProfile): Float? {
+        if (schoolPullState != SchoolPullState.LOITER) {
+            return null
+        }
+
+        val loiterOrigin = loiterCenter ?: return null
+        val horizontalOffset = Vec3(loiterOrigin.x - currentPosition.x, 0.0, loiterOrigin.z - currentPosition.z)
+        val distanceToCenter = horizontalOffset.length()
+        if (distanceToCenter <= profile.loiterRadius) {
+            return null
+        }
+
+        return yawTo(Vec3(loiterOrigin.x, currentPosition.y, loiterOrigin.z))
     }
 
     private fun isAllowedProbe(origin: Vec3, probeYaw: Float, probeDistance: Double): Boolean {
@@ -255,11 +335,44 @@ abstract class AbstractSchoolPullEntity(
         return (-Math.toDegrees(Mth.atan2(offset.x, offset.z))).toFloat()
     }
 
-    private fun randomTurnRate(profile: PullMovementProfile): Double =
+    private fun updateState(profile: PullMovementProfile, currentPosition: Vec3) {
+        if (stateTicksRemaining > 0) {
+            stateTicksRemaining--
+            return
+        }
+
+        when (schoolPullState) {
+            SchoolPullState.CRUISE -> enterState(
+                SchoolPullState.LOITER,
+                randomStateTicks(profile.loiterMinTicks, profile.loiterMaxTicks),
+                currentPosition,
+            )
+            SchoolPullState.LOITER -> enterState(
+                SchoolPullState.CRUISE,
+                randomStateTicks(profile.cruiseMinTicks, profile.cruiseMaxTicks),
+                currentPosition,
+            )
+        }
+    }
+
+    private fun enterState(state: SchoolPullState, durationTicks: Int, currentPosition: Vec3) {
+        schoolPullState = state
+        stateTicksRemaining = durationTicks
+        loiterCenter = if (state == SchoolPullState.LOITER) currentPosition else null
+        turnRetargetTicks = 0
+    }
+
+    private fun getActiveStateProfile(profile: PullMovementProfile): PullStateProfile =
+        if (schoolPullState == SchoolPullState.LOITER) profile.loiter else profile.cruise
+
+    private fun randomTurnRate(profile: PullStateProfile): Double =
         (random.nextDouble() * 2.0 - 1.0) * profile.maxTurnRateDeg
 
-    private fun randomRetargetTicks(profile: PullMovementProfile): Int =
+    private fun randomRetargetTicks(profile: PullStateProfile): Int =
         profile.retargetMinTicks + random.nextInt(profile.retargetMaxTicks - profile.retargetMinTicks + 1)
+
+    private fun randomStateTicks(minTicks: Int, maxTicks: Int): Int =
+        minTicks + random.nextInt(maxTicks - minTicks + 1)
 
     private fun approach(current: Double, target: Double, maxDelta: Double): Double =
         when {
